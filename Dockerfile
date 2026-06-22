@@ -35,7 +35,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
     chromium \
-
     fonts-liberation \
     fonts-noto-color-emoji \
     libnss3 \
