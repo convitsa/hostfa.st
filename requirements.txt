@@ -19,3 +19,4 @@ eval_type_backport
 aiohttp
 beautifulsoup4
 dnspython
+celery-redis-cluster
