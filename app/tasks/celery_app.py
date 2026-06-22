@@ -2,32 +2,19 @@ from celery import Celery  # type: ignore[import-untyped]
 from kombu import Queue, Exchange  # type: ignore[import-untyped]
 
 from app.config import get_settings
-from celery_redis_cluster_backend import install_redis_cluster_backend  # type: ignore[import-not-found]
-
 
 settings = get_settings()
-
-broker_url = settings.redis_url
-if "rediss://" in broker_url and "+cluster" not in broker_url:
-    broker_url = broker_url.replace("rediss://", "rediss+cluster://")
-elif "redis://" in broker_url and "+cluster" not in broker_url:
-    broker_url = broker_url.replace("redis://", "redis+cluster://")
-
-# Install the custom redis cluster backend to handle clustering redirection
-install_redis_cluster_backend()
-
 celery = Celery(
     "hostfast",
-    broker=broker_url,
-    backend=broker_url,
+    broker=settings.redis_url,
+    backend=settings.redis_url,
 )
 
-if broker_url.startswith("rediss"):
+if settings.redis_url.startswith("rediss://"):
     celery.conf.update(
         broker_use_ssl={"ssl_cert_reqs": "none"},
         redis_backend_use_ssl={"ssl_cert_reqs": "none"},
     )
-
 
 
 celery.conf.task_queues = (
