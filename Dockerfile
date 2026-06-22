@@ -32,10 +32,10 @@ ENV PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
 
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    nginx \
     ca-certificates \
     curl \
     chromium \
+
     fonts-liberation \
     fonts-noto-color-emoji \
     libnss3 \
@@ -68,15 +68,10 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install Playwright and Chromium browser binary dependencies
 RUN playwright install chromium --with-deps
 
-RUN mkdir -p /etc/nginx/sites-available \
-    && mkdir -p /etc/nginx/sites-enabled \
-    && ln -s /etc/nginx/sites-available/app.conf /etc/nginx/sites-enabled/
-
-COPY nginx.conf /etc/nginx/sites-available/app.conf
-
-EXPOSE 8000 80
+EXPOSE 80
 
 COPY . /app
 
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "80"]
+
 
