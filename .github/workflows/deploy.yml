@@ -13,8 +13,8 @@ on:
 env:
   ACR_NAME: "convitsaacrprod"
   RESOURCE_GROUP: "Convitsa-Production"
-  APP_NAME: "hostfa.st"
-  IMAGE_NAME: "hostfa.st"
+  APP_NAME: "hostfast"
+  IMAGE_NAME: "hostfast"
   ENVIRONMENT: "production"
 
 jobs:
