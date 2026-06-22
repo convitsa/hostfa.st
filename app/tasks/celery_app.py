@@ -10,6 +10,13 @@ celery = Celery(
     backend=settings.redis_url,
 )
 
+if settings.redis_url.startswith("rediss://"):
+    celery.conf.update(
+        broker_use_ssl={"ssl_cert_reqs": "none"},
+        redis_backend_use_ssl={"ssl_cert_reqs": "none"},
+    )
+
+
 celery.conf.task_queues = (
     Queue("scale", Exchange("scale"), routing_key="scale", queue_arguments={'x-max-priority': 10}),
     Queue("pro", Exchange("pro"), routing_key="pro", queue_arguments={'x-max-priority': 5}),
