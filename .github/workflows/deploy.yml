@@ -57,12 +57,22 @@ jobs:
       - name: Build Docker Image
         run: |
           docker build \
-            --build-arg MONGODB_URI="${{ secrets.MONGODB_URI }}" \
-            --build-arg MONGODB_DB="${{ secrets.MONGODB_DB }}" \
-            --build-arg PORT="${{ vars.PORT }}" \
+            --build-arg MONGODB_URL="${{ secrets.MONGODB_URL }}" \
+            --build-arg MONGODB_DB_NAME="${{ secrets.MONGODB_DB_NAME }}" \
+            --build-arg REDIS_URL="${{ secrets.REDIS_URL }}" \
+            --build-arg SECRET_KEY="${{ secrets.SECRET_KEY }}" \
+            --build-arg AZURE_STORAGE_CONNECTION_STRING="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
+            --build-arg AZURE_STORAGE_CONTAINER="${{ secrets.AZURE_STORAGE_CONTAINER }}" \
+            --build-arg CF_API_TOKEN="${{ secrets.CF_API_TOKEN }}" \
+            --build-arg CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}" \
+            --build-arg STRIPE_SECRET_KEY="${{ secrets.STRIPE_SECRET_KEY }}" \
+            --build-arg STRIPE_WEBHOOK_SECRET="${{ secrets.STRIPE_WEBHOOK_SECRET }}" \
             --build-arg RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
+            --build-arg FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
+            --build-arg PAGESPEED_API_KEY="${{ secrets.PAGESPEED_API_KEY }}" \
             -t ${{ steps.names.outputs.image_tag }} \
             -f Dockerfile .
+
 
       - name: Push Docker Image
         run: |
