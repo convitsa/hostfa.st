@@ -7,7 +7,6 @@ from app.tasks.celery_app import celery
 from app.config import get_settings
 from app.services.crawler import crawl_framer_site
 from app.services.blob_storage import AzureBlobStorage
-from app.services.cloudflare import upload_deployment
 from app.services.email_service import EmailService
 from app.models.site import Site
 from app.models.user import User
@@ -80,10 +79,16 @@ async def _crawl_and_deploy_async(site_id: str, trigger: str, deployment_id: Opt
     finally:
         await storage.client.close()
 
-    cf_deployment_id = await upload_deployment(site.cf_project_name or str(site.id), temp_dir)
+    sites_storage = AzureBlobStorage(
+        connection_string=settings.azure_storage_connection_string,
+        container_name=settings.azure_storage_sites_container
+    )
+    try:
+        await sites_storage.upload_site_files(str(site.id), temp_dir)
+    finally:
+        await sites_storage.client.close()
 
     deployment.status = "live"
-    deployment.cf_deployment_id = cf_deployment_id
     deployment.pages_crawled = result.pages_crawled
     deployment.assets_count = result.assets_count
     deployment.completed_at = datetime.utcnow()
@@ -132,27 +137,63 @@ def set_job_status_sync(job_id: str, status_data: dict) -> None:
     settings = get_settings()
     client = redis.from_url(settings.redis_url)
     try:
-        key = f"framer_export:job:{job_id}"
-        client.set(key, json.dumps(status_data), ex=86400) # 24 hour expiry
+        key = f"export_job:{job_id}"
+        client.set(key, json.dumps(status_data), ex=3600)
     finally:
         client.close()
 
-async def _export_site_async(framer_url: str, job_id: str) -> None:
+async def _export_site_async(job_id: str, framer_url: str) -> None:
     import zipfile
+    import redis.asyncio as aioredis
+    import json
     settings = get_settings()
     
-    # Update status to crawling
-    set_job_status_sync(job_id, {"status": "crawling"})
+    # 1. Update status to crawling in Redis
+    redis_client = aioredis.from_url(settings.redis_url)
+    try:
+        await redis_client.set(f"export_job:{job_id}", json.dumps({
+            "status": "crawling",
+            "pages_done": 0,
+        }), ex=3600)
+    finally:
+        await redis_client.close()
 
     temp_dir = f"/tmp/hostfast/export/{job_id}"
     os.makedirs(temp_dir, exist_ok=True)
     
+    # 2. Define progress callback to update Redis
+    def progress_cb(status, pages_done, current_url, assets_count):
+        if status == 'crawling':
+            async def update_redis():
+                r_client = aioredis.from_url(settings.redis_url)
+                try:
+                    await r_client.set(f"export_job:{job_id}", json.dumps({
+                        "status": "crawling",
+                        "pages_done": pages_done,
+                    }), ex=3600)
+                finally:
+                    await r_client.close()
+            asyncio.create_task(update_redis())
+            
     try:
         # Crawl framer site in export mode (relative assets paths)
-        result = await crawl_framer_site(framer_url, temp_dir, export_mode=True)
+        result = await crawl_framer_site(
+            framer_url,
+            temp_dir,
+            export_mode=True,
+            mode='fast',
+            progress_callback=progress_cb
+        )
         
         if not result.success:
-            set_job_status_sync(job_id, {"status": "failed", "error": result.error or "Failed to crawl Framer site"})
+            redis_client = aioredis.from_url(settings.redis_url)
+            try:
+                await redis_client.set(f"export_job:{job_id}", json.dumps({
+                    "status": "failed",
+                    "error": result.error or "Failed to crawl Framer site"
+                }), ex=3600)
+            finally:
+                await redis_client.close()
             return
 
         # Create ZIP archive
@@ -174,12 +215,18 @@ async def _export_site_async(framer_url: str, job_id: str) -> None:
             await storage.client.close()
 
         # Update status to done
-        set_job_status_sync(job_id, {
-            "status": "done",
-            "download_url": download_url,
-            "pages_count": result.pages_crawled,
-            "assets_count": result.assets_count
-        })
+        redis_client = aioredis.from_url(settings.redis_url)
+        try:
+            await redis_client.set(f"export_job:{job_id}", json.dumps({
+                "status": "done",
+                "download_url": download_url,
+                "pages_crawled": result.pages_crawled,
+                "assets_count": result.assets_count,
+                "total_sitemap_pages": result.total_sitemap_pages,
+                "partial": result.partial,
+            }), ex=3600)
+        finally:
+            await redis_client.close()
         
         # Cleanup zip file
         if os.path.exists(zip_path):
@@ -187,15 +234,22 @@ async def _export_site_async(framer_url: str, job_id: str) -> None:
             
     except Exception as e:
         logger.error(f"Error during export of {framer_url}: {e}", exc_info=True)
-        set_job_status_sync(job_id, {"status": "failed", "error": str(e)})
+        redis_client = aioredis.from_url(settings.redis_url)
+        try:
+            await redis_client.set(f"export_job:{job_id}", json.dumps({
+                "status": "failed",
+                "error": str(e),
+            }), ex=3600)
+        finally:
+            await redis_client.close()
     finally:
         # Cleanup crawl temp dir
         shutil.rmtree(temp_dir, ignore_errors=True)
 
 @celery.task(name="app.tasks.crawl_tasks.export_site")
-def export_site(framer_url: str, job_id: str) -> None:
+def export_site(job_id: str, framer_url: str) -> None:
     try:
-        asyncio.run(_export_site_async(framer_url, job_id))
+        asyncio.run(_export_site_async(job_id, framer_url))
     except Exception as e:
         logger.error(f"Celery export site task failed: {e}", exc_info=True)
         set_job_status_sync(job_id, {"status": "failed", "error": str(e)})

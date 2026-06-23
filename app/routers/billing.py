@@ -9,12 +9,9 @@ from app.models.site import Site
 from app.models.billing_event import BillingEvent
 from app.services.stripe_service import StripeService
 from app.services.email_service import EmailService
+from app.schemas.billing import CheckoutRequest
 
 router = APIRouter()
-
-class CheckoutRequest(BaseModel):
-    plan: str
-    interval: str
 
 class PortalRequest(BaseModel):
     pass
@@ -77,7 +74,11 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(...)) 
     if existing_event:
         return {"status": "already processed"}
 
-    billing_event = BillingEvent(stripe_event_id=event["id"], type=event["type"], data=event["data"]["object"])
+    billing_event = BillingEvent(
+        stripe_event_id=event["id"],
+        event_type=event["type"],
+        payload=event["data"]["object"]
+    )
     await billing_event.insert()
 
     settings = get_settings()
@@ -94,7 +95,10 @@ async def stripe_webhook(request: Request, stripe_signature: str = Header(...)) 
     elif event["type"] == "customer.subscription.updated":
         subscription = event["data"]["object"]
         customer_id = subscription.get("customer")
-        price_id = subscription.get("plan", {}).get("id")
+        try:
+            price_id = subscription["items"]["data"][0]["price"]["id"]
+        except (KeyError, IndexError):
+            price_id = None
         user = await User.find_one(User.stripe_customer_id == customer_id)
         if user:
             if price_id in (settings.stripe_starter_monthly, settings.stripe_starter_annual):

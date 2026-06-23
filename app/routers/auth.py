@@ -133,3 +133,28 @@ async def reset_password(request: ResetPasswordRequest, settings: Settings = Dep
     user.password_hash = hash_password(request.new_password)
     await user.save()
     return {"message": "Password reset successfully"}
+
+
+@router.delete("/delete-account")
+async def delete_account(user: User = Depends(get_current_user), settings: Settings = Depends(get_settings)):
+    if user.stripe_subscription_id:
+        try:
+            import stripe
+            stripe.api_key = settings.stripe_secret_key
+            await stripe.Subscription.cancel_async(user.stripe_subscription_id)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).error(f"Failed to cancel Stripe subscription during account deletion: {e}")
+
+    from app.models.site import Site
+    from app.models.deployment import Deployment
+    from beanie.operators import In
+    
+    sites = await Site.find(Site.user_id == user.id).to_list()
+    if sites:
+        site_ids = [site.id for site in sites]
+        await Deployment.find(In(Deployment.site_id, site_ids)).delete()
+        await Site.find(Site.user_id == user.id).delete()
+
+    await user.delete()
+    return {"message": "Account deleted successfully"}

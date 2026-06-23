@@ -193,8 +193,11 @@ async def verify_site_dns(site_id: str, user: User = Depends(get_current_user)):
         )
 
     try:
-        verified = await verify_domain(site.cf_project_name or f"hostfast-{site.id}", site.custom_domain)
-        if verified:
+        res = _check_cname_single(site.custom_domain)
+        if not res["verified"] and not site.custom_domain.startswith("www."):
+            res = _check_cname_single(f"www.{site.custom_domain}")
+            
+        if res["verified"]:
             # Change status to live when DNS verifies successfully
             site.status = "live"
             await site.save()
@@ -229,18 +232,31 @@ async def delete_site(site_id: str, user: User = Depends(get_current_user)):
     if site is None or site.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
 
-    # 1. Delete project from Cloudflare Pages
-    if site.cf_project_name:
-        try:
-            await delete_project(site.cf_project_name)
-        except Exception as e:
-            logger.error(f"Cloudflare project deletion failed for site {site.id}: {e}")
-
-    # 2. Cascade delete deployments
+    # 1. Cascade delete deployments from MongoDB
     await Deployment.find(Deployment.site_id == site.id).delete()
 
-    # 3. Delete site document
+    # 2. Delete site document from MongoDB
     await site.delete()
+
+    # 3. Delete blob files from Azure
+    from app.services.blob_storage import AzureBlobStorage
+    settings = get_settings()
+    sites_storage = AzureBlobStorage(
+        connection_string=settings.azure_storage_connection_string,
+        container_name=settings.azure_storage_sites_container
+    )
+    try:
+        await sites_storage.delete_site_files(str(site_id))
+    except Exception as e:
+        logger.error(f"Azure site files deletion failed for site {site_id}: {e}")
+    finally:
+        await sites_storage.client.close()
+
+    # 4. Invalidate cache
+    from app.routers.proxy import domain_cache
+    if site.custom_domain and site.custom_domain in domain_cache:
+        del domain_cache[site.custom_domain]
+
     return None
 
 
@@ -267,7 +283,7 @@ def _check_cname_single(domain: str) -> dict:
         answers = resolver.resolve(domain, 'CNAME')
         for rdata in answers:
             target = str(rdata.target).rstrip('.').lower()
-            if target == "hostfa.st":
+            if target in ("cname.hostfa.st", "cname.hostfa.st.", "hostfa.st", "hostfa.st."):
                 return {"verified": True}
         return {"verified": False, "reason": "CNAME points to wrong value"}
     except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):

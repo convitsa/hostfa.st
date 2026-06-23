@@ -13,6 +13,7 @@ class Settings(BaseSettings):
 
     azure_storage_connection_string: str
     azure_storage_container: str
+    azure_storage_sites_container: str = "hostfast-sites"
 
     cf_api_token: str
     cf_account_id: str

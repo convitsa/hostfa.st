@@ -4,7 +4,7 @@ from pydantic import BaseModel
 
 class CheckoutRequest(BaseModel):
     plan: Literal["starter", "pro", "scale"]
-    payment_method_id: str
+    interval: Literal["monthly", "annual"]
 
 
 class PlanResponse(BaseModel):

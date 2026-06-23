@@ -9,11 +9,11 @@ import redis.asyncio as aioredis
 from app.config import get_settings
 from app.services.crawler import is_valid_framer_url
 
+import json
+from app.tasks.crawl_tasks import export_site
+
 router = APIRouter()
 logger = logging.getLogger(__name__)
-
-# Module-level memory dictionary for job status (MVP)
-JOB_STORE = {}
 
 class ExportRequest(BaseModel):
     framer_url: str
@@ -27,101 +27,9 @@ def get_client_ip(request: Request) -> str:
         return real_ip
     return request.client.host if request.client else "unknown"
 
-async def run_export_task(framer_url: str, job_id: str, client_ip: str):
-    import shutil
-    import redis.asyncio as aioredis
-    from app.services.crawler import crawl_framer_site
-    from app.services.blob_storage import upload_file_to_blob
-
-    settings = get_settings()
-
-    # 1. Set rate limit key in Redis immediately as task starts
-    redis_client = aioredis.from_url(settings.redis_url)
-    try:
-        limit_key = f"export_ratelimit:{client_ip}"
-        await redis_client.set(limit_key, "1", ex=3600)
-    except Exception as e:
-        logger.error(f"Failed to set rate limit key in Redis: {e}")
-    finally:
-        await redis_client.close()
-
-    # 2. Update status in job store to crawling
-    JOB_STORE[job_id] = {
-        "status": "crawling",
-        "pages_crawled": 0,
-        "assets_count": 0,
-        "partial": False
-    }
-
-    temp_dir = f"/tmp/hostfast/export/{job_id}"
-    os.makedirs(temp_dir, exist_ok=True)
-
-    # 3. Define progress callback to capture real-time progress
-    def progress_cb(status, pages_done, current_url, assets_count):
-        if status == 'crawling':
-            JOB_STORE[job_id] = {
-                "status": "crawling",
-                "pages_crawled": pages_done,
-                "current_url": current_url,
-                "assets_count": assets_count,
-                "partial": False
-            }
-
-    try:
-        # Run crawler in fast mode
-        result = await crawl_framer_site(
-            framer_url,
-            temp_dir,
-            export_mode=True,
-            mode='fast',
-            progress_callback=progress_cb
-        )
-
-        if not result.success:
-            JOB_STORE[job_id] = {
-                "status": "failed",
-                "error": result.error or "Failed to crawl Framer site"
-            }
-            return
-
-        # 4. Upload ZIP file to Azure Blob
-        blob_name = f"exports/{job_id}.zip"
-        zip_path = result.zip_path
-
-        if not zip_path or not os.path.exists(zip_path):
-            raise FileNotFoundError("Crawler did not produce a ZIP archive")
-
-        download_url = await upload_file_to_blob(zip_path, blob_name, expiry_hours=1)
-
-        # 5. Mark status as done in store
-        JOB_STORE[job_id] = {
-            "status": "done",
-            "download_url": download_url,
-            "pages_crawled": result.pages_crawled,
-            "assets_count": result.assets_count,
-            "partial": result.partial,
-            "total_sitemap_pages": result.total_sitemap_pages
-        }
-
-    except Exception as e:
-        logger.error(f"Export background task failed for {job_id}: {e}", exc_info=True)
-        JOB_STORE[job_id] = {
-            "status": "failed",
-            "error": str(e)
-        }
-    finally:
-        # 6. Cleanup local temporary files and ZIP
-        shutil.rmtree(temp_dir, ignore_errors=True)
-        zip_path = f"/tmp/hostfast/export/{job_id}.zip"
-        if os.path.exists(zip_path):
-            try:
-                os.remove(zip_path)
-            except Exception:
-                pass
-
 
 @router.post("/export", status_code=status.HTTP_202_ACCEPTED)
-async def start_export(request: Request, body: ExportRequest, background_tasks: BackgroundTasks):
+async def start_export(request: Request, body: ExportRequest):
     settings = get_settings()
 
     # 1. Normalize and validate Framer URL
@@ -151,25 +59,36 @@ async def start_export(request: Request, body: ExportRequest, background_tasks: 
 
     # 3. Create job UUID
     job_id = str(uuid.uuid4())
-    JOB_STORE[job_id] = {
-        "status": "queued"
-    }
-
-    # 4. Start crawl in FastAPI background task
-    background_tasks.add_task(run_export_task, framer_url, job_id, ip)
+    
+    # 4. Store initial status in Redis and trigger Celery task
+    redis_client = aioredis.from_url(settings.redis_url)
+    try:
+        limit_key = f"export_ratelimit:{ip}"
+        await redis_client.set(limit_key, "1", ex=3600)
+        
+        await redis_client.set(f"export_job:{job_id}", json.dumps({"status": "queued"}), ex=3600)
+        export_site.apply_async(args=[job_id, framer_url], queue="starter")
+    finally:
+        await redis_client.close()
 
     return {"job_id": job_id}
 
 
 @router.get("/export/status/{job_id}")
 async def get_export_status(job_id: str):
-    job = JOB_STORE.get(job_id)
-    if not job:
+    settings = get_settings()
+    redis_client = aioredis.from_url(settings.redis_url)
+    try:
+        data = await redis_client.get(f"export_job:{job_id}")
+    finally:
+        await redis_client.close()
+        
+    if not data:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Export job not found"
         )
-    return job
+    return json.loads(data.decode("utf-8") if isinstance(data, bytes) else data)
 
 
 @router.get("/speed-test")
