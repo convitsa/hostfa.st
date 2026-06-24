@@ -70,7 +70,10 @@ router = APIRouter()
 async def proxy_site(request: Request, path: str = ""):
   
   # Step 1: Extract host
-  host = request.headers.get("host", "").lower()
+  host = (
+    request.headers.get("x-forwarded-host") or
+    request.headers.get("host", "")
+  ).lower()
   host = host.split(":")[0]
   if host.startswith("www."):
     host = host[4:]
