@@ -32,6 +32,7 @@ def create_app() -> FastAPI:
     app.include_router(billing.router, prefix="/billing", tags=["billing"])
     app.include_router(webhooks.router, prefix="/hooks", tags=["webhooks"])
     app.include_router(tools.router, prefix="/tools", tags=["tools"])
+    app.include_router(sites.caddy_router, prefix="/caddy", tags=["caddy"])
     app.include_router(proxy.router)
 
     return app

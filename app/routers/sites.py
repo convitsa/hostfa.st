@@ -338,3 +338,37 @@ async def verify_dns(request: Request, body: VerifyDNSRequest):
     # Return original verification failure if fallback also failed
     return res
 
+
+caddy_router = APIRouter()
+
+
+@caddy_router.get("/check-domain")
+async def check_domain(domain: str):
+    if not domain:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Domain must be a non-empty string"
+        )
+
+    domain_stripped = domain.lower()
+    if domain_stripped.startswith("www."):
+        domain_stripped = domain_stripped[4:]
+
+    site = await Site.find_one(
+        Site.custom_domain == domain_stripped,
+        Site.status == "active"
+    )
+    if not site:
+        site = await Site.find_one(
+            Site.custom_domain == domain_stripped,
+            Site.status == "live"
+        )
+
+    if not site:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Domain not found or not active"
+        )
+
+    return {"status": "ok"}
+
