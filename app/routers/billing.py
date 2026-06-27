@@ -1,3 +1,27 @@
+"""
+STRIPE WEBHOOK SETUP INSTRUCTIONS
+==================================
+
+1. Go to Stripe Dashboard -> Developers -> Webhooks
+2. Click "Add endpoint"
+3. Endpoint URL: https://api.hostfa.st/billing/webhook
+4. Select these events to listen to:
+   - checkout.session.completed
+   - customer.subscription.updated
+   - customer.subscription.deleted
+   - invoice.payment_failed
+   - invoice.payment_succeeded
+5. Copy the "Signing secret" (starts with whsec_)
+6. Add to your .env file:
+   STRIPE_WEBHOOK_SECRET=whsec_your_secret_here
+7. Also add test webhook for local development:
+   Use Stripe CLI: stripe listen --forward-to localhost:8000/billing/webhook
+   This gives you a temporary webhook secret for local testing.
+
+IMPORTANT: The webhook secret is different from your API key.
+Make sure to use the webhook signing secret, not the API secret key.
+"""
+
 from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from pydantic import BaseModel
 from typing import Dict, Any, List, Optional

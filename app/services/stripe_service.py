@@ -38,8 +38,8 @@ class StripeService:
             mode="subscription",
             allow_promotion_codes=True,
             line_items=[{"price": price_id, "quantity": 1}],
-            success_url=f"{self.settings.frontend_url}/billing?checkout=success",
-            cancel_url=f"{self.settings.frontend_url}/billing?checkout=cancelled",
+            success_url=f"{self.settings.frontend_url}/onboarding?checkout=success&plan={plan}",
+            cancel_url=f"{self.settings.frontend_url}/onboarding?checkout=cancelled",
         )
         return str(session.url)
 
