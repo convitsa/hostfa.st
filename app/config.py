@@ -1,4 +1,5 @@
 from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic import model_validator
 from typing import Literal
 from functools import lru_cache
 
@@ -34,6 +35,17 @@ class Settings(BaseSettings):
     cors_origins: str = "*"
     jwt_algorithm: Literal["HS256"] = "HS256"
     jwt_access_token_expires_minutes: int = 60 * 24
+
+    @model_validator(mode="after")
+    def clean_redis_url(self) -> "Settings":
+        url = self.redis_url
+        if "ssl_cert_reqs=CERT_NONE" in url:
+            self.redis_url = url.replace("ssl_cert_reqs=CERT_NONE", "ssl_cert_reqs=none")
+        elif "ssl_cert_reqs=CERT_REQUIRED" in url:
+            self.redis_url = url.replace("ssl_cert_reqs=CERT_REQUIRED", "ssl_cert_reqs=required")
+        elif "ssl_cert_reqs=CERT_OPTIONAL" in url:
+            self.redis_url = url.replace("ssl_cert_reqs=CERT_OPTIONAL", "ssl_cert_reqs=optional")
+        return self
 
 
 @lru_cache

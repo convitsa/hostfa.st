@@ -16,6 +16,7 @@ from app.services.cloudflare import create_cf_project, add_custom_domain, verify
 from app.tasks.crawl_tasks import crawl_and_deploy
 from app.services.crawler import is_valid_framer_url
 import dns.resolver
+import dns.exception
 import redis.asyncio as aioredis
 from pydantic import BaseModel
 from fastapi import Request
@@ -275,21 +276,40 @@ def get_client_ip(request: Request) -> str:
 
 
 def _check_cname_single(domain: str) -> dict:
+    logger.info(f"Checking CNAME for domain: {domain}")
     try:
         resolver = dns.resolver.Resolver()
         resolver.nameservers = ['8.8.8.8', '1.1.1.1']
         resolver.timeout = 5.0
         resolver.lifetime = 5.0
         answers = resolver.resolve(domain, 'CNAME')
+        resolved_targets = []
         for rdata in answers:
-            target = str(rdata.target).rstrip('.').lower()
-            if target in ("cname.hostfa.st", "cname.hostfa.st.", "hostfa.st", "hostfa.st."):
+            target = str(rdata.target).lower()
+            resolved_targets.append(target)
+            target_stripped = target.rstrip('.')
+            if target in ("cname.hostfa.st", "cname.hostfa.st.", "hostfa.st", "hostfa.st.") or \
+               target_stripped in ("cname.hostfa.st", "hostfa.st"):
+                logger.info(f"Domain {domain} successfully verified. Resolved CNAME: {target}")
                 return {"verified": True}
+        
+        logger.warning(f"Domain {domain} verification failed. Resolved CNAME targets: {resolved_targets} (none matched)")
         return {"verified": False, "reason": "CNAME points to wrong value"}
-    except (dns.resolver.NoAnswer, dns.resolver.NXDOMAIN):
+    except dns.resolver.NXDOMAIN as e:
+        logger.warning(f"Domain {domain} CNAME check failed: NXDOMAIN (No CNAME record found)")
         return {"verified": False, "reason": "No CNAME record found"}
-    except Exception:
-        return {"verified": False, "reason": "Could not resolve domain"}
+    except dns.resolver.NoAnswer as e:
+        logger.warning(f"Domain {domain} CNAME check failed: NoAnswer (No CNAME record found)")
+        return {"verified": False, "reason": "No CNAME record found"}
+    except dns.resolver.Timeout as e:
+        logger.warning(f"Domain {domain} CNAME check failed: Timeout (DNS query timed out)")
+        return {"verified": False, "reason": "DNS query timed out"}
+    except dns.exception.DNSException as e:
+        logger.error(f"Domain {domain} CNAME check failed: DNSException - {e}")
+        return {"verified": False, "reason": f"DNS error: {str(e)}"}
+    except Exception as e:
+        logger.error(f"Domain {domain} CNAME check failed: Unexpected error - {e}", exc_info=True)
+        return {"verified": False, "reason": f"Unexpected error: {str(e)}"}
 
 
 
@@ -325,18 +345,22 @@ async def verify_dns(request: Request, body: VerifyDNSRequest):
         await redis_client.close()
 
     # 3. DNS check
-    res = _check_cname_single(domain)
-    if res["verified"]:
-        return res
+    try:
+        res = _check_cname_single(domain)
+        if res["verified"]:
+            return res
 
-    # Fallback to www.{domain} if the root domain fails
-    if not domain.startswith("www."):
-        fallback_res = _check_cname_single(f"www.{domain}")
-        if fallback_res["verified"]:
+        # Fallback to www.{domain} if the root domain fails
+        if not domain.startswith("www."):
+            fallback_res = _check_cname_single(f"www.{domain}")
+            if fallback_res["verified"]:
+                return fallback_res
             return fallback_res
 
-    # Return original verification failure if fallback also failed
-    return res
+        return res
+    except Exception as e:
+        logger.error(f"Unhandled exception during DNS resolution for domain {domain}: {e}", exc_info=True)
+        return {"verified": False, "reason": f"DNS check failed: {str(e)}"}
 
 
 caddy_router = APIRouter()
