@@ -327,22 +327,39 @@ async def verify_dns(request: Request, body: VerifyDNSRequest):
     ip = get_client_ip(request)
     settings = get_settings()
     redis_client = aioredis.from_url(settings.redis_url)
+    limit_key = f"dns_verify_ratelimit:{ip}"
+    current = None
+    redis_available = True
     try:
-        limit_key = f"dns_verify_ratelimit:{ip}"
         current = await redis_client.get(limit_key)
-        if current and int(current) >= 10:
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="Rate limit exceeded. Try again in a minute."
-            )
+    except Exception as e:
+        logger.warning(f"Redis lookup failed for key {limit_key}: {e}. Skipping rate limiting.")
+        redis_available = False
 
-        async with redis_client.pipeline(transaction=True) as pipe:
-            pipe.incr(limit_key)
-            if not current:
-                pipe.expire(limit_key, 60)
-            await pipe.execute()
-    finally:
+    if redis_available and current and int(current) >= 10:
+        try:
+            await redis_client.close()
+        except Exception:
+            pass
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="Rate limit exceeded. Try again in a minute."
+        )
+
+    if redis_available:
+        try:
+            async with redis_client.pipeline(transaction=True) as pipe:
+                pipe.incr(limit_key)
+                if not current:
+                    pipe.expire(limit_key, 60)
+                await pipe.execute()
+        except Exception as e:
+            logger.warning(f"Redis pipeline write failed: {e}. Skipping rate limiting update.")
+
+    try:
         await redis_client.close()
+    except Exception:
+        pass
 
     # 3. DNS check
     try:
