@@ -1,8 +1,12 @@
+import logging
 import stripe
 from typing import Any, Optional
+from fastapi import HTTPException
 
 from app.config import get_settings
 from app.models.user import User
+
+logger = logging.getLogger(__name__)
 
 class StripeService:
     def __init__(self) -> None:
@@ -10,46 +14,64 @@ class StripeService:
         stripe.api_key = self.settings.stripe_secret_key
 
     async def get_or_create_customer(self, user: User) -> str:
-        if user.stripe_customer_id:
-            try:
-                await stripe.Customer.retrieve_async(user.stripe_customer_id)
-                return user.stripe_customer_id
-            except stripe.error.InvalidRequestError as e:
-                if "No such customer" in str(e):
-                    user.stripe_customer_id = None
-                    await user.save()
-                else:
-                    raise e
+        try:
+            if user.stripe_customer_id:
+                try:
+                    await stripe.Customer.retrieve_async(user.stripe_customer_id)
+                    return user.stripe_customer_id
+                except stripe.error.InvalidRequestError as e:
+                    if "No such customer" in str(e):
+                        user.stripe_customer_id = None
+                        await user.save()
+                    else:
+                        raise e
 
-        customer = await stripe.Customer.create_async(
-            email=user.email,
-            metadata={"user_id": str(user.id)}
-        )
-        user.stripe_customer_id = customer.id
-        await user.save()
-        return customer.id
+            customer = await stripe.Customer.create_async(
+                email=user.email,
+                metadata={"user_id": str(user.id)}
+            )
+            user.stripe_customer_id = customer.id
+            await user.save()
+            return customer.id
+        except stripe.error.StripeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.error(f"Stripe error: {e}")
+            raise HTTPException(status_code=500, detail="Payment service error")
 
     async def create_checkout_session(self, user: User, plan: str, interval: str) -> str:
-        customer_id = await self.get_or_create_customer(user)
-        price_id = self._get_price_id(plan, interval)
+        try:
+            customer_id = await self.get_or_create_customer(user)
+            price_id = self._get_price_id(plan, interval)
 
-        session = await stripe.checkout.Session.create_async(
-            customer=customer_id,
-            mode="subscription",
-            allow_promotion_codes=True,
-            line_items=[{"price": price_id, "quantity": 1}],
-            success_url=f"{self.settings.frontend_url}/onboarding?checkout=success&plan={plan}",
-            cancel_url=f"{self.settings.frontend_url}/onboarding?checkout=cancelled",
-        )
-        return str(session.url)
+            session = await stripe.checkout.Session.create_async(
+                customer=customer_id,
+                mode="subscription",
+                allow_promotion_codes=True,
+                line_items=[{"price": price_id, "quantity": 1}],
+                success_url=f"{self.settings.frontend_url}/onboarding?checkout=success&plan={plan}",
+                cancel_url=f"{self.settings.frontend_url}/onboarding?checkout=cancelled",
+            )
+            return str(session.url)
+        except stripe.error.StripeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.error(f"Stripe error: {e}")
+            raise HTTPException(status_code=500, detail="Payment service error")
 
     async def create_portal_session(self, user: User) -> str:
-        customer_id = await self.get_or_create_customer(user)
-        session = await stripe.billing_portal.Session.create_async(
-            customer=customer_id,
-            return_url=f"{self.settings.frontend_url}/billing",
-        )
-        return str(session.url)
+        try:
+            customer_id = await self.get_or_create_customer(user)
+            session = await stripe.billing_portal.Session.create_async(
+                customer=customer_id,
+                return_url=f"{self.settings.frontend_url}/billing",
+            )
+            return str(session.url)
+        except stripe.error.StripeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.error(f"Stripe error: {e}")
+            raise HTTPException(status_code=500, detail="Payment service error")
 
     async def get_subscription_details(self, user: User) -> dict:
         """Fetch real subscription details from Stripe."""
@@ -57,23 +79,31 @@ class StripeService:
             return {"status": "inactive", "current_period_end": None, "interval": None, "cancel_at_period_end": False}
 
         try:
-            sub = await stripe.Subscription.retrieve_async(
-                user.stripe_subscription_id,
-                expand=["items.data.price"]
-            )
+            try:
+                sub = await stripe.Subscription.retrieve_async(
+                    user.stripe_subscription_id,
+                    expand=["items.data.price"]
+                )
+            except stripe.error.InvalidRequestError:
+                return {"status": "inactive", "current_period_end": None, "interval": None, "cancel_at_period_end": False}
+
             interval = None
-            if sub.get("items") and sub["items"].get("data"):
-                price = sub["items"]["data"][0].get("price", {})
-                interval = price.get("recurring", {}).get("interval")  # "month" or "year"
+            try:
+                interval = sub.items.data[0].price.recurring.interval
+            except (IndexError, AttributeError):
+                pass
 
             return {
-                "status": sub.get("status"),  # "active", "past_due", "canceled", etc.
-                "current_period_end": sub.get("current_period_end"),  # Unix timestamp
+                "status": getattr(sub, "status", "inactive"),
+                "current_period_end": getattr(sub, "current_period_end", None),
                 "interval": interval,
-                "cancel_at_period_end": sub.get("cancel_at_period_end", False),
+                "cancel_at_period_end": getattr(sub, "cancel_at_period_end", False),
             }
-        except stripe.error.InvalidRequestError:
-            return {"status": "inactive", "current_period_end": None, "interval": None, "cancel_at_period_end": False}
+        except stripe.error.StripeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.error(f"Stripe error: {e}")
+            raise HTTPException(status_code=500, detail="Payment service error")
 
     async def get_invoices(self, user: User, limit: int = 20) -> list:
         """Fetch real invoices from Stripe."""
@@ -81,24 +111,32 @@ class StripeService:
             return []
 
         try:
-            invoices = await stripe.Invoice.list_async(
-                customer=user.stripe_customer_id,
-                limit=limit,
-            )
+            try:
+                invoices = await stripe.Invoice.list_async(
+                    customer=user.stripe_customer_id,
+                    limit=limit,
+                )
+            except stripe.error.InvalidRequestError:
+                return []
+
             result = []
-            for inv in invoices.get("data", []):
+            invoice_data = invoices.data if hasattr(invoices, "data") else []
+            for inv in invoice_data:
                 result.append({
-                    "id": inv.get("id"),
-                    "date": inv.get("created"),          # Unix timestamp
-                    "amount": inv.get("amount_paid"),    # In cents
-                    "currency": inv.get("currency", "usd"),
-                    "status": inv.get("status"),         # "paid", "open", "void", "uncollectible"
-                    "pdf_url": inv.get("invoice_pdf"),   # Real PDF URL
-                    "hosted_url": inv.get("hosted_invoice_url"),
+                    "id": getattr(inv, "id", None),
+                    "date": getattr(inv, "created", None),          # Unix timestamp
+                    "amount": getattr(inv, "amount_paid", 0),       # In cents
+                    "currency": getattr(inv, "currency", "usd"),
+                    "status": getattr(inv, "status", None),         # "paid", "open", "void", "uncollectible"
+                    "pdf_url": getattr(inv, "invoice_pdf", None),   # Real PDF URL
+                    "hosted_url": getattr(inv, "hosted_invoice_url", None),
                 })
             return result
-        except stripe.error.InvalidRequestError:
-            return []
+        except stripe.error.StripeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.error(f"Stripe error: {e}")
+            raise HTTPException(status_code=500, detail="Payment service error")
 
     async def get_payment_method(self, user: User) -> Optional[dict]:
         """Fetch the default payment method for the customer."""
@@ -106,35 +144,57 @@ class StripeService:
             return None
 
         try:
-            customer = await stripe.Customer.retrieve_async(
-                user.stripe_customer_id,
-                expand=["invoice_settings.default_payment_method"]
-            )
-            pm = customer.get("invoice_settings", {}).get("default_payment_method")
-            if not pm:
-                # Fall back to listing payment methods
-                pms = await stripe.PaymentMethod.list_async(
-                    customer=user.stripe_customer_id,
-                    type="card",
+            try:
+                customer = await stripe.Customer.retrieve_async(
+                    user.stripe_customer_id,
+                    expand=["invoice_settings.default_payment_method"]
                 )
-                pm_list = pms.get("data", [])
-                if not pm_list:
-                    return None
-                pm = pm_list[0]
+                
+                try:
+                    pm = customer.invoice_settings.default_payment_method
+                except AttributeError:
+                    pm = None
 
-            if isinstance(pm, str):
-                # pm is just an ID string, retrieve it
-                pm = await stripe.PaymentMethod.retrieve_async(pm)
+                if not pm:
+                    # Fall back to listing payment methods
+                    pms = await stripe.PaymentMethod.list_async(
+                        customer=user.stripe_customer_id,
+                        type="card",
+                    )
+                    pm_list = pms.data if hasattr(pms, "data") else []
+                    if not pm_list:
+                        return None
+                    pm = pm_list[0]
 
-            card = pm.get("card", {}) if isinstance(pm, dict) else {}
-            return {
-                "brand": card.get("brand", "card"),
-                "last4": card.get("last4", "****"),
-                "exp_month": card.get("exp_month"),
-                "exp_year": card.get("exp_year"),
-            }
-        except Exception:
-            return None
+                if isinstance(pm, str):
+                    pm = await stripe.PaymentMethod.retrieve_async(pm)
+
+                brand = "card"
+                last4 = "****"
+                exp_month = None
+                exp_year = None
+                try:
+                    if pm and hasattr(pm, "card") and pm.card is not None:
+                        brand = getattr(pm.card, "brand", "card")
+                        last4 = getattr(pm.card, "last4", "****")
+                        exp_month = getattr(pm.card, "exp_month", None)
+                        exp_year = getattr(pm.card, "exp_year", None)
+                except AttributeError:
+                    pass
+
+                return {
+                    "brand": brand,
+                    "last4": last4,
+                    "exp_month": exp_month,
+                    "exp_year": exp_year,
+                }
+            except stripe.error.InvalidRequestError:
+                return None
+        except stripe.error.StripeError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        except Exception as e:
+            logger.error(f"Stripe error: {e}")
+            raise HTTPException(status_code=500, detail="Payment service error")
 
     def _get_price_id(self, plan: str, interval: str) -> str:
         plan_map = {

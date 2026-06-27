@@ -12,7 +12,6 @@ from app.models.user import User
 from app.config import get_settings
 from app.schemas.site import CreateSiteRequest, SiteResponse, SiteDetailResponse
 from app.schemas.deployment import DeploymentResponse
-from app.services.cloudflare import create_cf_project, add_custom_domain, verify_domain, delete_project
 from app.tasks.crawl_tasks import crawl_and_deploy
 from app.services.crawler import is_valid_framer_url
 import dns.resolver
@@ -100,28 +99,7 @@ async def create_site(request: CreateSiteRequest, user: User = Depends(get_curre
     )
     await site.insert()
 
-    # 4. Integrate Cloudflare project configurations
-    cf_project_name = f"hostfast-{str(site.id)}"
-    try:
-        cf_project = await create_cf_project(cf_project_name)
-        site.cf_project_name = cf_project_name
-        site.cf_project_id = cf_project["id"]
-
-        # Bind custom domain on Cloudflare if set
-        if request.custom_domain:
-            await add_custom_domain(cf_project_name, request.custom_domain)
-
-        await site.save()
-    except Exception as e:
-        logger.error(f"Cloudflare project creation failed for site {site.id}: {e}")
-        # Revert site record insertion
-        await site.delete()
-        raise HTTPException(
-            status_code=500,
-            detail=f"Cloudflare project creation failed: {str(e)}"
-        )
-
-    # 5. Enqueue initial site crawl Celery task
+    # 4. Enqueue initial site crawl Celery task
     try:
         crawl_and_deploy.delay(str(site.id), "initial")
     except Exception as e:
