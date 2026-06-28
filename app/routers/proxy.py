@@ -1,4 +1,5 @@
 import logging
+import json
 from pathlib import Path
 from fastapi import APIRouter, Request, Response, HTTPException
 from fastapi.responses import HTMLResponse
@@ -11,6 +12,7 @@ from app.models.site import Site
 logger = logging.getLogger(__name__)
 
 domain_cache: TTLCache = TTLCache(maxsize=1000, ttl=60)
+meta_cache: TTLCache = TTLCache(maxsize=1000, ttl=300)
 
 NOT_FOUND_HTML = """<!DOCTYPE html>
 <html>
@@ -113,16 +115,51 @@ async def proxy_site(request: Request, path: str = ""):
   )
   content = await storage.get_site_file(site_id, blob_path)
 
-  if content is None and blob_path != "index.html":
-    content = await storage.get_site_file(site_id, "index.html")
-
   if content is None:
+    # Step 1: Get _hostfast_meta.json from cache or blob
+    if f"meta:{site_id}" in meta_cache:
+      meta = meta_cache[f"meta:{site_id}"]
+    else:
+      meta_bytes = await storage.get_site_file(site_id, "_hostfast_meta.json")
+      if meta_bytes:
+        try:
+          meta = json.loads(meta_bytes)
+        except Exception:
+          meta = {"custom_404_path": None}
+      else:
+        meta = {"custom_404_path": None}
+      meta_cache[f"meta:{site_id}"] = meta
+
+    # Step 2: Try to serve custom 404 page
+    custom_404_path = meta.get("custom_404_path")
+    if custom_404_path:
+      content_404 = await storage.get_site_file(site_id, custom_404_path)
+      if content_404:
+        return Response(
+          content=content_404,
+          media_type="text/html; charset=utf-8",
+          status_code=404,
+          headers={"Cache-Control": "public, max-age=300",
+                   "X-Served-By": "hostfa.st"}
+        )
+
+    # Step 3: If no custom 404, return generic hostfa.st 404 HTML.
     return HTMLResponse(content=NOT_FOUND_HTML, status_code=404)
 
   # Step 6: Return response
+  path_lower = blob_path.lower()
+  is_404_path = any(p in path_lower for p in [
+    "/404/", "404/", "not-found", "notfound", "page-not-found"
+  ])
+  if is_404_path and content:
+    status_code = 404
+  else:
+    status_code = 200
+
   return Response(
     content=content,
     media_type=get_content_type(blob_path),
+    status_code=status_code,
     headers={
       "Cache-Control": get_cache_control(blob_path),
       "X-Served-By": "hostfa.st",

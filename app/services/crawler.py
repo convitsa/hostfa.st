@@ -58,6 +58,7 @@ async def crawl_framer_site(
     sitemap_found = False
     sitemap_urls = []
     total_sitemap_pages = None
+    custom_404_path = None
 
     try:
         async with aiohttp.ClientSession() as session:
@@ -154,7 +155,7 @@ async def crawl_framer_site(
             semaphore = asyncio.Semaphore(sem_limit)
 
             async def process_page(url: str):
-                nonlocal pages_crawled
+                nonlocal pages_crawled, custom_404_path
                 async with semaphore:
                     if len(crawled_pages) >= max_pages:
                         return
@@ -164,13 +165,27 @@ async def crawl_framer_site(
                     page = await context.new_page()
                     page_timeout = 15000  # Page render timeout
                     try:
+                        response = None
                         try:
-                            await page.goto(url, wait_until="networkidle", timeout=page_timeout)
+                            response = await page.goto(url, wait_until="networkidle", timeout=page_timeout)
                         except Exception:
                             try:
-                                await page.goto(url, wait_until="load", timeout=10000)
+                                response = await page.goto(url, wait_until="load", timeout=10000)
                             except Exception:
                                 pass
+                        
+                        if response and response.status == 404:
+                            parsed_url = urlparse(url)
+                            path_str = parsed_url.path.strip("/")
+                            if not path_str:
+                                rel_file_path = "index.html"
+                            elif path_str.endswith(".html"):
+                                rel_file_path = path_str
+                            else:
+                                rel_file_path = os.path.join(path_str, "index.html")
+                            
+                            if custom_404_path is None:
+                                custom_404_path = rel_file_path.replace("\\", "/")
                         
                         # Scroll page to bottom in 3 steps with 500ms delay each to trigger lazy-loaded assets
                         try:
@@ -481,6 +496,35 @@ async def crawl_framer_site(
                             out_f.write(content)
                     except Exception as e:
                         logger.error(f"Failed to write modified file {rel_file_path}: {e}")
+        # Detect custom 404 page if not dynamically detected during crawl
+        POSSIBLE_404_PATHS = [
+            "404/index.html",
+            "_404/index.html",
+            "not-found/index.html",
+            "notfound/index.html",
+            "error/index.html",
+            "errors/index.html",
+            "page-not-found/index.html",
+        ]
+
+        if not custom_404_path:
+            for path in POSSIBLE_404_PATHS:
+                full_path = os.path.join(output_dir, path)
+                if os.path.exists(full_path):
+                    custom_404_path = path
+                    break
+
+        if custom_404_path:
+            custom_404_path = custom_404_path.replace("\\", "/")
+
+        # Save metadata to _hostfast_meta.json
+        try:
+            import json
+            meta = {"custom_404_path": custom_404_path}
+            with open(os.path.join(output_dir, "_hostfast_meta.json"), "w", encoding="utf-8") as f:
+                json.dump(meta, f)
+        except Exception as e:
+            logger.error(f"Failed to create _hostfast_meta.json: {e}")
 
         # Create SPA routing files (Part 5)
         try:
