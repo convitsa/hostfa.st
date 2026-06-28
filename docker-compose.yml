@@ -9,8 +9,9 @@ services:
       - "8000:8000"
     env_file:
       - .env
-    depends_on:
-      - redis
+    restart: unless-stopped
+    volumes:
+      - /var/www/sites:/var/www/sites
 
   celery_worker:
     build: .
@@ -18,8 +19,9 @@ services:
     command: celery -A app.tasks.celery_app.celery worker --loglevel=info -Q starter,pro,scale,default
     env_file:
       - .env
-    depends_on:
-      - redis
+    restart: unless-stopped
+    volumes:
+      - /var/www/sites:/var/www/sites
 
   celery_beat:
     build: .
@@ -27,12 +29,4 @@ services:
     command: celery -A app.tasks.celery_app.celery beat --loglevel=info
     env_file:
       - .env
-    depends_on:
-      - redis
-
-  redis:
-    image: redis:7-alpine
-    container_name: hostfast_redis
-    ports:
-      - "6379:6379"
-    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    restart: unless-stopped
