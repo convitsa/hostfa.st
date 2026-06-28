@@ -3,7 +3,7 @@ import logging
 import asyncio
 from typing import Optional, Set
 from dataclasses import dataclass
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlunparse
 
 import aiohttp
 import warnings
@@ -59,37 +59,51 @@ async def crawl_framer_site(
     sitemap_urls = []
     total_sitemap_pages = None
 
-    if mode == 'fast':
-        try:
-            async with aiohttp.ClientSession() as session:
-                async with session.get(sitemap_url, timeout=10) as resp:
-                    if resp.status == 200:
-                        xml_content = await resp.text()
-                        sitemap_soup = BeautifulSoup(xml_content, "html.parser")
-                        loc_tags = sitemap_soup.find_all("loc")
-                        for tag in loc_tags:
-                            loc_url = tag.get_text().strip()
-                            parsed_loc = urlparse(loc_url)
-                            if parsed_loc.hostname == parsed_base_url.hostname:
-                                sitemap_urls.append(loc_url.split("#")[0])
-                        # Preserve order, deduplicate
-                        seen = set()
-                        deduped_urls = []
-                        for u in sitemap_urls:
-                            if u not in seen:
-                                seen.add(u)
-                                deduped_urls.append(u)
-                        total_sitemap_pages = len(deduped_urls)
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(sitemap_url, timeout=10) as resp:
+                if resp.status == 200:
+                    xml_content = await resp.text()
+                    sitemap_soup = BeautifulSoup(xml_content, "html.parser")
+                    loc_tags = sitemap_soup.find_all("loc")
+                    
+                    sitemap_locs = [tag.get_text().strip() for tag in loc_tags if tag.get_text().strip()]
+                    
+                    for loc in sitemap_locs:
+                        loc_parsed = urlparse(loc)
+                        corrected = urlunparse((
+                            parsed_base_url.scheme or "https",
+                            parsed_base_url.netloc,
+                            loc_parsed.path,
+                            loc_parsed.params,
+                            loc_parsed.query,
+                            loc_parsed.fragment
+                        ))
+                        sitemap_urls.append(corrected.split("#")[0])
+
+                    # Preserve order, deduplicate
+                    seen = set()
+                    deduped_urls = []
+                    for u in sitemap_urls:
+                        if u not in seen:
+                            seen.add(u)
+                            deduped_urls.append(u)
+                    
+                    total_sitemap_pages = len(deduped_urls)
+                    if mode == 'fast':
                         sitemap_urls = deduped_urls[:5]
-                        if sitemap_urls:
-                            sitemap_found = True
-        except Exception as e:
-            logger.error(f"Failed to fetch or parse sitemap.xml: {e}")
+                    else:
+                        sitemap_urls = deduped_urls
+                        
+                    if sitemap_urls:
+                        sitemap_found = True
+    except Exception as e:
+        logger.error(f"Failed to fetch or parse sitemap.xml: {e}")
 
     if sitemap_found:
         pages_to_crawl = set(sitemap_urls)
         url_depths = {u: 0 for u in sitemap_urls}
-        logger.info(f"Discovered sitemap.xml, crawling 5 URLs: {sitemap_urls}")
+        logger.info(f"Discovered sitemap.xml, crawling {len(sitemap_urls)} URLs: {sitemap_urls}")
     else:
         pages_to_crawl = {framer_url}
         url_depths = {framer_url: 0}
