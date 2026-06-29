@@ -1,47 +1,44 @@
 from fastapi import APIRouter, Depends, HTTPException, status
-from beanie import PydanticObjectId
-from beanie.operators import In
-
 from app.routers.auth import get_current_user
-from app.models.site import Site
-from app.models.deployment import Deployment
 from app.models.user import User
-from app.schemas.deployment import DeploymentResponse
-from app.tasks.crawl_tasks import crawl_and_deploy
+from app.models.site import Site
+from app.services.local_storage import get_site_history, rollback_deployment
+from beanie import PydanticObjectId
 
 router = APIRouter()
 
-
-def serialize_deployment(deployment: Deployment) -> DeploymentResponse:
-    return DeploymentResponse(
-        id=str(deployment.id),
-        site_id=str(deployment.site_id),
-        trigger=deployment.trigger,
-        status=deployment.status,
-        cf_deployment_id=deployment.cf_deployment_id,
-        blob_container=deployment.blob_container,
-        pages_crawled=deployment.pages_crawled,
-        assets_count=deployment.assets_count,
-        error_message=deployment.error_message,
-        started_at=deployment.started_at,
-        completed_at=deployment.completed_at,
-        created_at=deployment.created_at,
-    )
-
-
-@router.get("", response_model=list[DeploymentResponse])
-async def list_deployments(user: User = Depends(get_current_user)):
-    sites = await Site.find(Site.user_id == user.id).to_list()
-    site_ids = [site.id for site in sites]
-    deployments = await Deployment.find(In(Deployment.site_id, site_ids)).to_list()
-    return [serialize_deployment(deployment) for deployment in deployments]
-
-
-@router.post("/{site_id}/trigger")
-async def trigger_deployment(site_id: str, user: User = Depends(get_current_user)):
-    site = await Site.get(PydanticObjectId(site_id))
+@router.get("/{site_id}/history")
+async def list_site_deployments_history(
+    site_id: str,
+    user: User = Depends(get_current_user)
+):
+    try:
+        site = await Site.get(PydanticObjectId(site_id))
+    except Exception:
+        site = None
+        
     if site is None or site.user_id != user.id:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
 
-    task = crawl_and_deploy.delay(site_id, "manual")
-    return {"task_id": task.id, "status": "queued"}
+    history = await get_site_history(site_id)
+    return history
+
+@router.post("/{site_id}/rollback/{deployment_id}")
+async def trigger_rollback(
+    site_id: str,
+    deployment_id: str,
+    user: User = Depends(get_current_user)
+):
+    try:
+        site = await Site.get(PydanticObjectId(site_id))
+    except Exception:
+        site = None
+        
+    if site is None or site.user_id != user.id:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Site not found")
+
+    success = await rollback_deployment(site_id, deployment_id)
+    if not success:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Rollback failed. Deployment not found.")
+
+    return {"success": True, "deployment_id": deployment_id}

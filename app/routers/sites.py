@@ -217,19 +217,9 @@ async def delete_site(site_id: str, user: User = Depends(get_current_user)):
     # 2. Delete site document from MongoDB
     await site.delete()
 
-    # 3. Delete blob files from Azure
-    from app.services.blob_storage import AzureBlobStorage
-    settings = get_settings()
-    sites_storage = AzureBlobStorage(
-        connection_string=settings.azure_storage_connection_string,
-        container_name=settings.azure_storage_sites_container
-    )
-    try:
-        await sites_storage.delete_site_files(str(site_id))
-    except Exception as e:
-        logger.error(f"Azure site files deletion failed for site {site_id}: {e}")
-    finally:
-        await sites_storage.client.close()
+    # 3. Delete site directory from local storage
+    from app.services.local_storage import delete_site as local_delete_site
+    await local_delete_site(str(site_id))
 
     # 4. Invalidate cache
     from app.routers.proxy import domain_cache

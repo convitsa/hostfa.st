@@ -30,3 +30,5 @@ services:
     env_file:
       - .env
     restart: unless-stopped
+    volumes:
+      - /var/www/sites:/var/www/sites

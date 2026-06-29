@@ -31,6 +31,7 @@ class Settings(BaseSettings):
     frontend_url: str = "http://localhost:3000"
 
     pagespeed_api_key: str = ""
+    local_sites_dir: str = "/var/www/sites"
 
     cors_origins: str = "*"
     jwt_algorithm: Literal["HS256"] = "HS256"

@@ -67,51 +67,6 @@ class AzureBlobStorage:
             blob_client = container_client.get_blob_client(blob.name)
             await blob_client.delete_blob()
 
-    async def upload_site_files(self, site_id: str, local_dir: str) -> int:
-        await self._ensure_container()
-        container_client = self.client.get_container_client(self.container_name)
-        count = 0
-        for root, _, files in os.walk(local_dir):
-            for file in files:
-                local_path = os.path.join(root, file)
-                rel_path = os.path.relpath(local_path, local_dir)
-                blob_path = f"{site_id}/{rel_path}"
-
-                content_type, _ = mimetypes.guess_type(local_path)
-                if not content_type:
-                     content_type = "application/octet-stream"
-
-                with open(local_path, "rb") as data:
-                    blob_client = container_client.get_blob_client(blob_path)
-                    await blob_client.upload_blob(
-                        data,
-                        overwrite=True,
-                        content_settings=ContentSettings(content_type=content_type),
-                    )
-                count += 1
-        return count
-
-    async def get_site_file(self, site_id: str, blob_path: str) -> bytes | None:
-        await self._ensure_container()
-        container_client = self.client.get_container_client(self.container_name)
-        full_blob_path = f"{site_id}/{blob_path}"
-        blob_client = container_client.get_blob_client(full_blob_path)
-        
-        from azure.core.exceptions import ResourceNotFoundError
-        try:
-            download_stream = await blob_client.download_blob()
-            return await download_stream.readall()
-        except ResourceNotFoundError:
-            return None
-
-    async def delete_site_files(self, site_id: str) -> None:
-        await self._ensure_container()
-        container_client = self.client.get_container_client(self.container_name)
-        prefix = f"{site_id}/"
-        async for blob in container_client.list_blobs(name_starts_with=prefix):
-            blob_client = container_client.get_blob_client(blob.name)
-            await blob_client.delete_blob()
-
     async def upload_file(self, blob_name: str, local_file_path: str) -> None:
         await self._ensure_container()
         container_client = self.client.get_container_client(self.container_name)

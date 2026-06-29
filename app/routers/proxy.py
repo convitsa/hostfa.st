@@ -5,8 +5,7 @@ from fastapi import APIRouter, Request, Response, HTTPException
 from fastapi.responses import HTMLResponse
 
 from cachetools import TTLCache
-from app.config import Settings
-from app.services.blob_storage import AzureBlobStorage
+from app.services.local_storage import get_site_file
 from app.models.site import Site
 
 logger = logging.getLogger(__name__)
@@ -107,20 +106,15 @@ async def proxy_site(request: Request, path: str = ""):
   else:
     blob_path = path
 
-  # Step 5: Fetch from blob
-  settings = Settings()
-  storage = AzureBlobStorage(
-    connection_string=settings.azure_storage_connection_string,
-    container_name=settings.azure_storage_sites_container
-  )
-  content = await storage.get_site_file(site_id, blob_path)
+  # Step 5: Fetch from local storage
+  content = await get_site_file(site_id, blob_path)
 
   if content is None:
-    # Step 1: Get _hostfast_meta.json from cache or blob
+    # Step 1: Get _hostfast_meta.json from cache or local storage
     if f"meta:{site_id}" in meta_cache:
       meta = meta_cache[f"meta:{site_id}"]
     else:
-      meta_bytes = await storage.get_site_file(site_id, "_hostfast_meta.json")
+      meta_bytes = await get_site_file(site_id, "_hostfast_meta.json")
       if meta_bytes:
         try:
           meta = json.loads(meta_bytes)
@@ -133,7 +127,7 @@ async def proxy_site(request: Request, path: str = ""):
     # Step 2: Try to serve custom 404 page
     custom_404_path = meta.get("custom_404_path")
     if custom_404_path:
-      content_404 = await storage.get_site_file(site_id, custom_404_path)
+      content_404 = await get_site_file(site_id, custom_404_path)
       if content_404:
         return Response(
           content=content_404,

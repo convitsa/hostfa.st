@@ -79,14 +79,24 @@ async def _crawl_and_deploy_async(site_id: str, trigger: str, deployment_id: Opt
     finally:
         await storage.client.close()
 
-    sites_storage = AzureBlobStorage(
-        connection_string=settings.azure_storage_connection_string,
-        container_name=settings.azure_storage_sites_container
-    )
+    from app.services.local_storage import save_deployment
     try:
-        await sites_storage.upload_site_files(str(site.id), temp_dir)
-    finally:
-        await sites_storage.client.close()
+        await save_deployment(
+            site_id=str(site.id),
+            deployment_id=str(deployment.id),
+            source_dir=temp_dir,
+            metadata={
+                "deployment_id": str(deployment.id),
+                "created_at": datetime.utcnow().isoformat() + "Z",
+                "pages_crawled": result.pages_crawled,
+                "assets_count": result.assets_count,
+                "trigger": trigger,
+                "framer_url": site.framer_url,
+                "status": "live"
+            }
+        )
+    except Exception as e:
+        logger.error(f"Local storage save_deployment failed for site {site.id}: {e}")
 
     deployment.status = "live"
     deployment.pages_crawled = result.pages_crawled
