@@ -10,25 +10,12 @@ on:
         required: true
         type: string
 
-env:
-  ACR_NAME: "convitsaacrprod"
-  RESOURCE_GROUP: "Convitsa-Production"
-  APP_NAME: "hostfast"
-  IMAGE_NAME: "hostfast"
-  ENVIRONMENT: "production"
-
 jobs:
-  build-and-deploy:
+  deploy:
     runs-on: ubuntu-latest
     environment: production
-    permissions:
-      contents: read
-      id-token: write
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
       - name: Get version
         id: version
         run: |
@@ -40,61 +27,37 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "📦 Deploying version: $VERSION"
 
-      - name: Azure Login
-        uses: azure/login@v2
+      - name: Deploy to VM via SSH
+        uses: appleboy/ssh-action@v1
         with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
+          host: ${{ secrets.VM_HOST }}
+          username: ${{ secrets.VM_USER }}
+          key: ${{ secrets.VM_SSH_KEY }}
+          script: |
+            set -e
+            cd /home/azureadmin/hostfa.st && \
+            git fetch --tags origin && \
+            git checkout ${{ steps.version.outputs.version }} && \
+            docker compose up -d --build api celery_worker celery_beat && \
+            docker image prune -f && \
+            echo "✅ Backend deployed: ${{ steps.version.outputs.version }}"
 
-      - name: ACR Login
-        run: az acr login --name ${{ env.ACR_NAME }}
-
-      - name: Define image tag
-        id: names
+      - name: Health check
         run: |
-          echo "image_tag=${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:${{ steps.version.outputs.version }}" >> "$GITHUB_OUTPUT"
-          echo "latest_tag=${{ env.ACR_NAME }}.azurecr.io/${{ env.IMAGE_NAME }}:latest" >> "$GITHUB_OUTPUT"
-
-      - name: Build Docker Image
-        run: |
-          docker build \
-            --build-arg MONGODB_URL="${{ secrets.MONGODB_URL }}" \
-            --build-arg MONGODB_DB_NAME="${{ secrets.MONGODB_DB_NAME }}" \
-            --build-arg REDIS_URL="${{ secrets.REDIS_URL }}" \
-            --build-arg SECRET_KEY="${{ secrets.SECRET_KEY }}" \
-            --build-arg AZURE_STORAGE_CONNECTION_STRING="${{ secrets.AZURE_STORAGE_CONNECTION_STRING }}" \
-            --build-arg AZURE_STORAGE_CONTAINER="${{ secrets.AZURE_STORAGE_CONTAINER }}" \
-            --build-arg CF_API_TOKEN="${{ secrets.CF_API_TOKEN }}" \
-            --build-arg CF_ACCOUNT_ID="${{ secrets.CF_ACCOUNT_ID }}" \
-            --build-arg STRIPE_SECRET_KEY="${{ secrets.STRIPE_SECRET_KEY }}" \
-            --build-arg STRIPE_WEBHOOK_SECRET="${{ secrets.STRIPE_WEBHOOK_SECRET }}" \
-            --build-arg RESEND_API_KEY="${{ secrets.RESEND_API_KEY }}" \
-            --build-arg FRONTEND_URL="${{ secrets.FRONTEND_URL }}" \
-            --build-arg PAGESPEED_API_KEY="${{ secrets.PAGESPEED_API_KEY }}" \
-            -t ${{ steps.names.outputs.image_tag }} \
-            -f Dockerfile .
-
-
-      - name: Push Docker Image
-        run: |
-          docker push ${{ steps.names.outputs.image_tag }}
-          docker tag ${{ steps.names.outputs.image_tag }} ${{ steps.names.outputs.latest_tag }}
-          docker push ${{ steps.names.outputs.latest_tag }}
-
-      - name: Deploy to Azure Web App (container)
-        uses: azure/webapps-deploy@v2
-        with:
-          app-name: ${{ env.APP_NAME }}
-          images: "${{ steps.names.outputs.image_tag }}"
+          sleep 15
+          STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://api.hostfa.st/auth/me)
+          if [ "$STATUS" = "401" ] || [ "$STATUS" = "200" ]; then
+            echo "✅ Health check passed: $STATUS"
+          else
+            echo "❌ Health check failed: $STATUS"
+            exit 1
+          fi
 
       - name: Deployment Summary
         run: |
-          echo "## 🚀 Production Deployment Summary" >> $GITHUB_STEP_SUMMARY
-          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "## 🚀 Backend Deployment" >> $GITHUB_STEP_SUMMARY
           echo "- **Version:** ${{ steps.version.outputs.version }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **App Name:** ${{ env.APP_NAME }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Image:** ${{ steps.names.outputs.image_tag }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Environment:** ${{ env.ENVIRONMENT }}" >> $GITHUB_STEP_SUMMARY
-          echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **VM:** ${{ secrets.VM_HOST }}" >> $GITHUB_STEP_SUMMARY
           if [ "${{ github.event_name }}" = "release" ]; then
             echo "- **Release:** [${{ github.event.release.name }}](${{ github.event.release.html_url }})" >> $GITHUB_STEP_SUMMARY
           fi
