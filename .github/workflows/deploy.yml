@@ -1,6 +1,8 @@
 name: Deploy Backend - Production
 
 on:
+  push:
+    branches: [ main ]
   release:
     types: [published]
   workflow_dispatch:
@@ -21,6 +23,8 @@ jobs:
         run: |
           if [ "${{ github.event_name }}" = "release" ]; then
             VERSION="${{ github.event.release.tag_name }}"
+          elif [ "${{ github.event_name }}" = "push" ]; then
+            VERSION="${{ github.sha }}"
           else
             VERSION="${{ inputs.version }}"
           fi
@@ -36,7 +40,7 @@ jobs:
           script: |
             set -e
             cd /home/azureadmin/hostfa.st && \
-            git fetch --tags origin && \
+            git fetch origin && \
             git checkout ${{ steps.version.outputs.version }} && \
             docker compose up -d --build api celery_worker celery_beat && \
             docker image prune -f && \
